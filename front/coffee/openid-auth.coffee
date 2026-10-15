@@ -44,8 +44,9 @@ OpenIDLoginButtonDirective = ($window, $params, $location, $config, $events, $co
 
 		# The same URI on every page and on both legs: taiga-back replays `url`
 		# as redirect_uri in the token exchange, and the OIDC client needs only
-		# one registered redirect URI, <origin>/login.
-		redirectURL = () -> $window.location.origin + $navUrls.resolve("login")
+		# one registered redirect URI, <origin>/login. $tgNavUrls.resolve strips
+		# the leading slash ("login"), so it is added back here.
+		redirectURL = () -> $window.location.origin + "/" + $navUrls.resolve("login")
 
 		# sessionStorage can throw (privacy modes, disabled storage); every
 		# failure degrades to a plain login without the invitation.
