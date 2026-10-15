@@ -32,26 +32,63 @@ OpenIDLoginButtonDirective = ($window, $params, $location, $config, $events, $co
 	# Requirements:
 	#   - ...
 
+	INVITE_STASH_KEY = "taiga-oidc-invitation"
+	INVITE_STASH_MAX_AGE_MS = 30 * 60 * 1000
+	INVITATION_PATH_PREFIX = "/invitation/"
+
 	link = ($scope, $el, $attrs) ->
 		AUTH_URL = $config.get("openidAuth", null)
 		AUTH_SCOPE = $config.get("openidScope", "User.Read")
 		CLIENT_ID = $config.get("openidClientId", "taiga")
 		$scope.openid_name = $config.get("openidName", "openid-connect")
-		loginOnSuccess = (response) ->
-			if $params.next and $params.next != $navUrls.resolve("login")
-				nextUrl = $params.next
-			else
-				nextUrl = $navUrls.resolve("home")
 
-			$events.setupConnection()
+		# The same URI on every page and on both legs: taiga-back replays `url`
+		# as redirect_uri in the token exchange, and the OIDC client needs only
+		# one registered redirect URI, <origin>/login.
+		redirectURL = () -> $window.location.origin + $navUrls.resolve("login")
 
-			$location.search("next", null)
-			$location.search("token", null)
-			$location.search("state", null)
-			$location.search("code", null)
-			$location.path(nextUrl)
+		# sessionStorage can throw (privacy modes, disabled storage); every
+		# failure degrades to a plain login without the invitation.
+		writeInviteStash = (stash) ->
+			try
+				$window.sessionStorage.setItem(INVITE_STASH_KEY, JSON.stringify(stash))
+			catch e
+				null
 
-		redirectURL = () -> $location.absUrl().split('?')[0]
+		# Removed before it is used, so a failed claim (revoked invite, already
+		# a member) cannot wedge later logins.
+		takeInviteStash = ->
+			try
+				raw = $window.sessionStorage.getItem(INVITE_STASH_KEY)
+				$window.sessionStorage.removeItem(INVITE_STASH_KEY)
+			catch e
+				return null
+			return null if not raw
+			try
+				stash = JSON.parse(raw)
+			catch e
+				return null
+			return null if not stash or not stash.token or typeof stash.ts != "number"
+			return null if Date.now() - stash.ts >= INVITE_STASH_MAX_AGE_MS
+			return stash
+
+		makeLoginOnSuccess = (invite) ->
+			return (response) ->
+				if invite and invite.project
+					nextUrl = $navUrls.resolve("project", {project: invite.project})
+				else if $params.next and $params.next != $navUrls.resolve("login")
+					nextUrl = $params.next
+				else
+					nextUrl = $navUrls.resolve("home")
+
+				$events.setupConnection()
+
+				$location.search("next", null)
+				$location.search("token", null)
+				$location.search("state", null)
+				$location.search("code", null)
+				$location.path(nextUrl)
+
 		loginOnError = (response) ->
 			$location.search("state", null)
 			$location.search("code", null)
@@ -63,28 +100,41 @@ OpenIDLoginButtonDirective = ($window, $params, $location, $config, $events, $co
 				$confirm.notify("light-error", "Our Oompa Loompas have not been able to get your credentials from OpenID.") #TODO: i18n
 
 		loginWithOpenIDAccount = ->
-			type = $params.state
 			code = $params.code
-			token = $params.token
 			accessToken = $params.access_token
 			return if not (code) && not(accessToken)
 			$loader.start(true)
 
 			if code
-				data = {code: code, url:redirectURL()}
-				$auth.login(data, "openid").then(loginOnSuccess, loginOnError)
+				data = {code: code, url: redirectURL()}
 			else
-				data = {access_token: accessToken, url:redirectURL()}
-				$auth.login(data, "openid").then(loginOnSuccess, loginOnError)
+				data = {access_token: accessToken, url: redirectURL()}
+
+			# invitation_token, not `token`: taiga-back core accepts the
+			# invitation after any login type, plugins included.
+			invite = takeInviteStash()
+			data.invitation_token = invite.token if invite
+
+			$auth.login(data, "openid").then(makeLoginOnSuccess(invite), loginOnError)
 
 		loginWithOpenIDAccount()
 
-
 		$el.on "click", ".button-auth", (event) ->
-			console.log(redirectURL());
-			redirectToUri = redirectURL();
-			url = "#{AUTH_URL}?redirect_uri=#{redirectToUri}&client_id=#{CLIENT_ID}&response_type=code&scope=#{AUTH_SCOPE}"
-			window.location.href = url
+			path = $location.path() or ""
+			if $params.token and path.indexOf(INVITATION_PATH_PREFIX) == 0
+				writeInviteStash({
+					token: $params.token
+					project: ($scope.invitation and $scope.invitation.project_slug) or null
+					ts: Date.now()
+				})
+				# taiga-front's login page sends an authenticated user home and
+				# drops ?code=, so the callback would never run.
+				$auth.logout() if $auth.isAuthenticated()
+
+			url = "#{AUTH_URL}?redirect_uri=#{encodeURIComponent(redirectURL())}" +
+				"&client_id=#{encodeURIComponent(CLIENT_ID)}&response_type=code" +
+				"&scope=#{encodeURIComponent(AUTH_SCOPE)}"
+			$window.location.href = url
 
 		$scope.$on "$destroy", ->
 			$el.off()
